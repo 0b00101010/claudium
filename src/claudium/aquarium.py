@@ -47,6 +47,7 @@ class Aquarium:
         self.stats = SessionStats()
         self.selected_fish_idx: int = -1
         self.log_scroll = 0
+        self.milestones_triggered: set[str] = set()
         self._setup_curses()
         self._setup_seaweed()
         self._setup_floor_decor()
@@ -255,6 +256,7 @@ class Aquarium:
         elif ev.kind == "task_completed":
             self._on_task_completed(ev, w)
         self._record_event(ev)
+        self._check_milestones(h, w)
 
     def _record_event(self, ev: Event):
         """Create an EventLogEntry from the event and append to the log."""
@@ -269,6 +271,8 @@ class Aquarium:
             detail = f"{ev.tool_name}: {'fail' if not ev.success else 'ok'}"
         elif ev.kind == "task_completed":
             detail = f"task: {ev.task_subject}"
+        elif ev.kind == "milestone":
+            detail = ev.description or "milestone reached"
         else:
             detail = ev.kind
 
@@ -282,6 +286,39 @@ class Aquarium:
             self.event_log = self.event_log[-200:]
 
         self.stats.total_events += 1
+
+    def _check_milestones(self, h, w):
+        # 100th tool call -> burst of jellyfish
+        if self.total_tools >= 100 and "tools_100" not in self.milestones_triggered:
+            self.milestones_triggered.add("tools_100")
+            for _ in range(5):
+                self.ambient_creatures.append(AmbientCreature(
+                    kind="jellyfish",
+                    x=random.uniform(3, max(4, w - 8)),
+                    y=random.uniform(OCEAN_TOP + 1, self._ocean_bottom(h)),
+                    speed=random.uniform(0.02, 0.05),
+                    direction=random.choice([-1, 1]),
+                ))
+            self._record_event(Event(
+                kind="milestone", timestamp=time.time(),
+                description="100 tools reached! Ocean comes alive!",
+            ))
+
+        # 10th agent -> school of fish
+        if self.total_agents >= 10 and "agents_10" not in self.milestones_triggered:
+            self.milestones_triggered.add("agents_10")
+            for _ in range(4):
+                self.ambient_creatures.append(AmbientCreature(
+                    kind="fish",
+                    x=random.uniform(0, max(1, w - 5)),
+                    y=random.uniform(OCEAN_TOP + 1, self._ocean_bottom(h)),
+                    speed=random.uniform(0.15, 0.25),
+                    direction=random.choice([-1, 1]),
+                ))
+            self._record_event(Event(
+                kind="milestone", timestamp=time.time(),
+                description="10 agents spawned! Fish school appears!",
+            ))
 
     def _on_agent_start(self, ev: Event, h: int, w: int):
         ocean_top = OCEAN_TOP
@@ -634,12 +671,10 @@ class Aquarium:
     def _draw_hud(self, h, w):
         with self.lock:
             active = sum(1 for f in self.fishes if f.status in (AgentStatus.SPAWNING, AgentStatus.WORKING))
-            creatures = len(self.creatures)
 
-        sock_status = "connected" if self.server._running else "disconnected"
-        hud = (f" Claudium  |  Agents: {active} active, {self.total_agents} total  |  "
-               f"Tools: {self.total_tools}  |  Creatures: {creatures}  |  "
-               f"Socket: {sock_status}  |  [Q] quit  [D] demo ")
+        hud = (f" Claudium  |  Agents: {active}/{self.total_agents}  |  "
+               f"Tools: {self.total_tools}  |  Events: {self.stats.total_events}  |  "
+               f"[Q]uit [D]emo [Tab]panel [\u2190\u2192]select [Esc]desel ")
         self._safe_addstr(self._panel_top(h) - 1, 0, hud[:w - 1], curses.color_pair(1) | curses.A_REVERSE)
 
     # ──────────────────────────────────────────
