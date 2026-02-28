@@ -10,6 +10,7 @@ from claudium.entities import (
     SAILBOAT_ART, DOLPHIN_ART,
     TOOL_CREATURE_ARTS, ToolCreature, AmbientCreature,
     JELLYFISH_ARTS, AMBIENT_FISH_ART, BIRD_ARTS,
+    EventLogEntry, SessionStats,
 )
 
 
@@ -302,3 +303,23 @@ class TestFishCreation:
         assert f.flip is False
         assert f.bubbles == []
         assert f.start_time > 0
+
+
+class TestNewDataStructures:
+    def test_event_log_entry(self):
+        entry = EventLogEntry(timestamp=1.0, kind="tool_start", detail="Bash: npm test")
+        assert entry.kind == "tool_start"
+        assert entry.detail == "Bash: npm test"
+
+    def test_session_stats_defaults(self):
+        stats = SessionStats()
+        assert stats.tool_counts == {}
+        assert stats.total_events == 0
+        assert stats.error_count == 0
+        assert stats.session_start > 0
+
+    def test_fish_last_tool(self):
+        f = Fish(agent_id="a", label="test", status=AgentStatus.WORKING,
+                 x=0, y=0, speed=1, art_idx=0)
+        assert f.last_tool == ""
+        assert f.last_tool_time == 0.0

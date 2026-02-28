@@ -306,6 +306,25 @@ class Fish:
     alive: bool = True
     flip: bool = False
     start_time: float = field(default_factory=time.time)
+    last_tool: str = ""
+    last_tool_time: float = 0.0
+
+
+@dataclass
+class EventLogEntry:
+    """A single entry in the event log panel."""
+    timestamp: float
+    kind: str
+    detail: str
+
+
+@dataclass
+class SessionStats:
+    """Accumulated session statistics."""
+    tool_counts: dict = field(default_factory=dict)
+    total_events: int = 0
+    error_count: int = 0
+    session_start: float = field(default_factory=time.time)
 
 
 # ──────────────────────────────────────────────
