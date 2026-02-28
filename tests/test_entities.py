@@ -1,7 +1,7 @@
 # tests/test_entities.py
 import json
 import pytest
-from entities import (
+from claudium.entities import (
     AgentStatus, Fish, ToolBubble, TaskCoral, Bubble, Cloud,
     Event, parse_event, agent_type_to_art_idx,
     FISH_ARTS, BUBBLE_CHARS, SEAWEED_FRAMES, WAVE_FRAMES,
@@ -256,37 +256,37 @@ class TestAmbientLife:
 
 class TestFloorDecor:
     def test_coral_arts_structure(self):
-        from entities import CORAL_ARTS
+        from claudium.entities import CORAL_ARTS
         assert len(CORAL_ARTS) >= 2
         for lines, w, h, color in CORAL_ARTS:
             assert len(lines) == h
             assert isinstance(color, str)
 
     def test_rock_arts_structure(self):
-        from entities import ROCK_ARTS
+        from claudium.entities import ROCK_ARTS
         assert len(ROCK_ARTS) >= 1
         for lines, w, h, color in ROCK_ARTS:
             assert len(lines) == h
 
     def test_shell_and_starfish(self):
-        from entities import SHELL_ART, STARFISH_ART
+        from claudium.entities import SHELL_ART, STARFISH_ART
         text, w, h, color = SHELL_ART
         assert len(text) == w
         text2, w2, h2, color2 = STARFISH_ART
         assert len(text2) == w2
 
     def test_seaweed_wide_structure(self):
-        from entities import SEAWEED_WIDE
+        from claudium.entities import SEAWEED_WIDE
         assert len(SEAWEED_WIDE) >= 1
         for frame0, frame1 in SEAWEED_WIDE:
             assert len(frame0) == len(frame1)
 
     def test_floor_pattern_nonempty(self):
-        from entities import FLOOR_PATTERN
+        from claudium.entities import FLOOR_PATTERN
         assert len(FLOOR_PATTERN) > 10
 
     def test_floor_decor_dataclass(self):
-        from entities import FloorDecor
+        from claudium.entities import FloorDecor
         d = FloorDecor(kind="coral", x=10, art_idx=0, height=2)
         assert d.kind == "coral"
         assert d.x == 10

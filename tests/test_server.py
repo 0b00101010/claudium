@@ -5,7 +5,7 @@ import socket
 import time
 import tempfile
 import pytest
-from server import EventServer
+from claudium.server import EventServer
 
 
 @pytest.fixture

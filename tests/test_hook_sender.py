@@ -6,7 +6,7 @@ import threading
 import time
 import tempfile
 import pytest
-from hook_sender import send_to_socket, build_event_from_hook
+from claudium.hook_sender import send_to_socket, build_event_from_hook
 
 
 @pytest.fixture
