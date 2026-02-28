@@ -6,7 +6,7 @@ import math
 import random
 import time
 import threading
-from entities import (
+from .entities import (
     AgentStatus, Fish, Bubble, ToolBubble, TaskCoral,
     Creature, CreatureType, mcp_tool_to_creature_type,
     ToolCreature, AmbientCreature, FloorDecor,
@@ -16,7 +16,7 @@ from entities import (
     TOOL_CREATURE_ARTS, JELLYFISH_ARTS, AMBIENT_FISH_ART, BIRD_ARTS,
     SEAWEED_WIDE, CORAL_ARTS, SHELL_ART, STARFISH_ART, ROCK_ARTS, FLOOR_PATTERN,
 )
-from server import EventServer
+from .server import EventServer
 
 SURFACE_ROW = 4   # wave surface starts here (rows 4-5)
 OCEAN_TOP = SURFACE_ROW + 2  # first fully underwater row

@@ -5,7 +5,7 @@ import os
 import socket
 import threading
 from collections import deque
-from entities import Event, parse_event
+from .entities import Event, parse_event
 
 
 class EventServer:
