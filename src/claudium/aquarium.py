@@ -1108,6 +1108,7 @@ class Aquarium:
             self._draw_hud(h, w)
             self._draw_panel(h, w)
 
-            self.stdscr.refresh()
+            self.stdscr.noutrefresh()
+            curses.doupdate()
             self.tick += 1
             time.sleep(0.05)  # ~20fps
