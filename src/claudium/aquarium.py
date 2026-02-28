@@ -340,6 +340,13 @@ class Aquarium:
                 bx = parent_fish.x + random.uniform(-2, 5)
                 by = parent_fish.y - 1
 
+            # Update speech bubble on the target fish
+            target_fish = parent_fish if parent_fish else self.main_fish
+            if target_fish:
+                summary = ev.tool_input_summary or ev.tool_name
+                target_fish.last_tool = f"{ev.tool_name}: {summary}"[:25]
+                target_fish.last_tool_time = time.time()
+
             summary = ev.tool_input_summary or ev.tool_name
             self.tool_bubbles.append(ToolBubble(
                 x=bx, y=by,
@@ -511,7 +518,7 @@ class Aquarium:
         tile = (pattern * ((w // len(pattern)) + 2))[:w - 1]
         self._safe_addstr(self._panel_top(h) - 2, 0, tile, curses.color_pair(3) | curses.A_DIM)
 
-    def _draw_fish(self, fish: Fish, h, w):
+    def _draw_fish(self, fish: Fish, h, w, selected=False):
         art_right, art_left, fw, fh = FISH_ARTS[fish.art_idx]
         art = art_right if fish.direction == 1 else art_left
 
@@ -525,6 +532,9 @@ class Aquarium:
             color = curses.color_pair(7)
         else:
             color = curses.color_pair(5) | curses.A_BOLD
+
+        if selected:
+            color |= curses.A_REVERSE
 
         wobble_y = int(math.sin(self.tick * 0.15 + fish.x * 0.1) * 0.7)
         draw_y = int(fish.y) + wobble_y
@@ -541,6 +551,16 @@ class Aquarium:
             time_str = f" {elapsed:.0f}s" if fish.status == AgentStatus.WORKING else ""
             text = fish.label[:20] + time_str
             self._safe_addstr(label_y, label_x, text, curses.color_pair(8) | curses.A_DIM)
+
+        # Speech bubble: last tool call
+        if fish.last_tool and time.time() - fish.last_tool_time < 10:
+            bubble_y = label_y - 1
+            if OCEAN_TOP <= bubble_y < self._panel_top(h) - 1:
+                age = time.time() - fish.last_tool_time
+                attr = curses.color_pair(8)
+                if age > 7:
+                    attr |= curses.A_DIM
+                self._safe_addstr(bubble_y, label_x, fish.last_tool, attr)
 
         # Fish bubbles
         for b in fish.bubbles:
@@ -630,7 +650,7 @@ class Aquarium:
         panel_top = self._panel_top(h)
         # Separator line with tab indicators
         tabs = []
-        for mode in ["log", "stats"]:
+        for mode in ["log", "stats", "detail"]:
             if mode == self.panel_mode:
                 tabs.append(f"[{mode.upper()}]")
             else:
@@ -698,8 +718,34 @@ class Aquarium:
             line2 = f" Top tools: {tools_str}"
             self._safe_addstr(top + 1, 0, line2[:w - 1], curses.color_pair(8) | curses.A_DIM)
 
+    def _get_selectable_fish_unlocked(self):
+        """Return selectable fish list. Caller must hold self.lock or ensure thread safety."""
+        active = [f for f in self.fishes if f.alive and f.status in (AgentStatus.SPAWNING, AgentStatus.WORKING)]
+        result = list(active)
+        if self.main_fish:
+            result.append(self.main_fish)
+        return result
+
+    def _get_selectable_fish(self):
+        with self.lock:
+            return self._get_selectable_fish_unlocked()
+
     def _draw_detail_panel(self, top, height, w):
-        self._safe_addstr(top, 1, "No fish selected.", curses.color_pair(8) | curses.A_DIM)
+        selectable = self._get_selectable_fish()
+        if self.selected_fish_idx < 0 or self.selected_fish_idx >= len(selectable):
+            self._safe_addstr(top, 1, "No fish selected. Use \u2190 \u2192 to select.",
+                              curses.color_pair(8) | curses.A_DIM)
+            return
+
+        fish = selectable[self.selected_fish_idx]
+        elapsed = time.time() - fish.start_time
+
+        line1 = f" Agent: {fish.label[:20]} ({fish.agent_id[:10]})  |  Status: {fish.status.value.upper()} {elapsed:.0f}s"
+        self._safe_addstr(top, 0, line1[:w-1], curses.color_pair(8))
+
+        dir_arrow = '\u2192' if fish.direction == 1 else '\u2190'
+        line2 = f" Last tool: {fish.last_tool or 'none'}  |  Speed: {fish.speed:.1f}  |  Dir: {dir_arrow}"
+        self._safe_addstr(top + 1, 0, line2[:w-1], curses.color_pair(8) | curses.A_DIM)
 
     # ──────────────────────────────────────────
     #  Update logic
@@ -955,6 +1001,20 @@ class Aquarium:
                     self.panel_mode = "log"
                 elif self.panel_mode == "detail":
                     self.panel_mode = "log"
+            if key == curses.KEY_LEFT:
+                selectable = self._get_selectable_fish()
+                if selectable:
+                    self.selected_fish_idx = (self.selected_fish_idx - 1) % len(selectable)
+                    self.panel_mode = "detail"
+            elif key == curses.KEY_RIGHT:
+                selectable = self._get_selectable_fish()
+                if selectable:
+                    self.selected_fish_idx = (self.selected_fish_idx + 1) % len(selectable)
+                    self.panel_mode = "detail"
+            elif key == 27:  # Esc
+                self.selected_fish_idx = -1
+                if self.panel_mode == "detail":
+                    self.panel_mode = "log"
             if key == curses.KEY_UP and self.panel_mode == "log":
                 self.log_scroll = min(self.log_scroll + 1, max(0, len(self.event_log) - PANEL_HEIGHT + 1))
             elif key == curses.KEY_DOWN and self.panel_mode == "log":
@@ -973,17 +1033,28 @@ class Aquarium:
             self._draw_water_bg(h, w)
             self._draw_ambient(h, w)
 
+            selectable = self._get_selectable_fish()
+            selected_fish = selectable[self.selected_fish_idx] if 0 <= self.selected_fish_idx < len(selectable) else None
+
             with self.lock:
                 for fish in self.fishes:
                     self._update_fish(fish, h, w)
-                    self._draw_fish(fish, h, w)
+                    self._draw_fish(fish, h, w, selected=(fish is selected_fish))
                 self.fishes = [f for f in self.fishes if f.alive]
+
+                # Reset selection if selected fish is gone
+                if self.selected_fish_idx >= 0:
+                    selectable = self._get_selectable_fish_unlocked()
+                    if self.selected_fish_idx >= len(selectable):
+                        self.selected_fish_idx = len(selectable) - 1 if selectable else -1
+                        if self.selected_fish_idx == -1 and self.panel_mode == "detail":
+                            self.panel_mode = "log"
 
                 # Main agent turtle: always alive, update + draw
                 if self.main_fish is not None:
                     self._update_fish(self.main_fish, h, w)
                     self.main_fish.alive = True  # never dies
-                    self._draw_fish(self.main_fish, h, w)
+                    self._draw_fish(self.main_fish, h, w, selected=(self.main_fish is selected_fish))
 
                 for creature in self.creatures:
                     self._update_creature(creature, h, w)
