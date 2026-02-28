@@ -5,6 +5,7 @@ import curses
 import json
 import os
 import random
+import shutil
 import sys
 import threading
 import time
@@ -67,6 +68,11 @@ def _check_existing_hooks(settings_path: str) -> dict:
 
 def _install_hooks(settings_path: str, sock_path: str):
     """Install Claudium hooks into Claude Code settings."""
+    if not shutil.which("claudium-hook"):
+        print("Warning: 'claudium-hook' not found on PATH.")
+        print("Make sure claudium is installed: pip install -e .")
+        print()
+
     # Load existing settings
     settings = {}
     if os.path.exists(settings_path):

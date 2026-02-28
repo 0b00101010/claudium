@@ -27,13 +27,16 @@ Real-time ASCII aquarium that visualizes Claude Code agent and tool activity.
 ## Quick Start
 
 ```bash
-# 1. Install hooks (one-time)
-python install.py
+# Install
+pip install -e .
 
-# 2. Restart Claude Code (to activate hooks)
+# Install hooks (one-time)
+claudium install
 
-# 3. Run the aquarium in a separate terminal
-python main.py
+# Restart Claude Code (to activate hooks)
+
+# Run the aquarium in a separate terminal
+claudium
 ```
 
 Agent and tool events will now appear in the aquarium as you use Claude Code.
@@ -43,7 +46,7 @@ Agent and tool events will now appear in the aquarium as you use Claude Code.
 Test without a Claude Code connection:
 
 ```bash
-python main.py --demo
+claudium --demo
 ```
 
 ## Keyboard
@@ -58,53 +61,65 @@ python main.py --demo
 ```
 Claude Code                    Claudium
 ┌──────────┐   hook event    ┌──────────────┐
-│  Agent   │ ──────────────> │ hook_sender  │
-│ Tool Use │   (stdin JSON)  │   .py        │
+│  Agent   │ ──────────────> │ claudium-hook│
+│ Tool Use │   (stdin JSON)  │ (entry point)│
 └──────────┘                 └──────┬───────┘
                                     │ Unix socket
                                     v
                              ┌──────────────┐
-                             │  server.py   │
+                             │    server    │
                              │ (socket recv)│
                              └──────┬───────┘
                                     │ event queue
                                     v
                              ┌──────────────┐
-                             │ aquarium.py  │
+                             │   aquarium   │
                              │ (TUI render) │
                              └──────────────┘
 ```
 
-1. `install.py` registers 6 hooks in `~/.claude/settings.json`
-2. Claude Code invokes `hook_sender.py` on each event
-3. `hook_sender.py` sends JSON over a Unix socket (`/tmp/claudium.sock`)
-4. `server.py` receives events and queues them
-5. `aquarium.py` renders the aquarium at ~20fps
+1. `claudium install` registers 6 hooks in `~/.claude/settings.json`
+2. Claude Code invokes `claudium-hook` on each event
+3. `claudium-hook` sends JSON over a Unix socket (`/tmp/claudium.sock`)
+4. `server` receives events and queues them
+5. `aquarium` renders the aquarium at ~20fps
 
 ## File Structure
 
 ```
-main.py          # Entrypoint
-aquarium.py      # Curses TUI renderer
-entities.py      # Data models + ASCII art
-server.py        # Unix socket server
-hook_sender.py   # Claude Code hooks → socket
-install.py       # Hook install/uninstall
-tests/           # pytest tests
+src/claudium/
+├── __init__.py      # Package version
+├── __main__.py      # python -m claudium support
+├── cli.py           # Unified CLI (run/install/uninstall/check)
+├── aquarium.py      # Curses TUI renderer
+├── entities.py      # Data models + ASCII art
+├── server.py        # Unix socket server
+└── hook_sender.py   # Claude Code hooks → socket
+tests/               # pytest tests
 ```
 
-## Options
+## Commands
 
 ```bash
+# Start aquarium (default)
+claudium
+claudium run
+
+# Demo mode
+claudium --demo
+
 # Custom socket path
-python install.py --sock /tmp/custom.sock
-python main.py --sock /tmp/custom.sock
+claudium --sock /tmp/custom.sock
+
+# Install hooks
+claudium install
+claudium install --sock /tmp/custom.sock
 
 # Check hook status
-python install.py --check
+claudium check
 
 # Uninstall hooks
-python install.py --uninstall
+claudium uninstall
 ```
 
 ## Requirements
