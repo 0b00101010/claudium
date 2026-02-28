@@ -11,6 +11,7 @@ from .entities import (
     Creature, CreatureType, mcp_tool_to_creature_type,
     ToolCreature, AmbientCreature, FloorDecor,
     Cloud, Event, agent_type_to_art_idx,
+    EventLogEntry, SessionStats,
     FISH_ARTS, BUBBLE_CHARS, SEAWEED_FRAMES, WAVE_FRAMES,
     SAILBOAT_ART, DOLPHIN_ART, CLOUD_ARTS, SUN_ART, MOON_ART, STAR_CHARS,
     TOOL_CREATURE_ARTS, JELLYFISH_ARTS, AMBIENT_FISH_ART, BIRD_ARTS,
@@ -20,6 +21,7 @@ from .server import EventServer
 
 SURFACE_ROW = 4   # wave surface starts here (rows 4-5)
 OCEAN_TOP = SURFACE_ROW + 2  # first fully underwater row
+PANEL_HEIGHT = 6  # bottom panel height (separator + tab bar + content rows)
 
 
 class Aquarium:
@@ -40,6 +42,11 @@ class Aquarium:
         self.clouds: list[Cloud] = []
         self.sky_body = "sun"
         self.lock = threading.Lock()
+        self.panel_mode = "log"  # "log", "stats", "detail"
+        self.event_log: list[EventLogEntry] = []
+        self.stats = SessionStats()
+        self.selected_fish_idx: int = -1
+        self.log_scroll = 0
         self._setup_curses()
         self._setup_seaweed()
         self._setup_floor_decor()
@@ -119,7 +126,7 @@ class Aquarium:
     def _setup_main_fish(self):
         h, w = self.stdscr.getmaxyx()
         ocean_top = OCEAN_TOP
-        ocean_bot = h - 5
+        ocean_bot = self._ocean_bottom(h)
         mid_y = (ocean_top + ocean_bot) / 2
         self.main_fish = Fish(
             agent_id="__main__",
@@ -146,7 +153,7 @@ class Aquarium:
 
     def _setup_ambient(self):
         h, w = self.stdscr.getmaxyx()
-        ocean_bot = h - 5
+        ocean_bot = self._ocean_bottom(h)
         # Jellyfish 2~3
         for _ in range(random.randint(2, 3)):
             self.ambient_creatures.append(AmbientCreature(
@@ -174,6 +181,14 @@ class Aquarium:
                 speed=random.uniform(0.08, 0.15),
                 direction=random.choice([-1, 1]),
             ))
+
+    def _ocean_bottom(self, h):
+        """Row of the ocean floor (just above the sandy floor line)."""
+        return h - 3 - PANEL_HEIGHT
+
+    def _panel_top(self, h):
+        """First row of the bottom panel."""
+        return h - PANEL_HEIGHT
 
     def _is_night(self):
         hour = time.localtime().tm_hour
@@ -239,10 +254,38 @@ class Aquarium:
                 self._on_creature_end(ev)
         elif ev.kind == "task_completed":
             self._on_task_completed(ev, w)
+        self._record_event(ev)
+
+    def _record_event(self, ev: Event):
+        """Create an EventLogEntry from the event and append to the log."""
+        if ev.kind == "agent_start":
+            detail = f"{ev.agent_type}: {ev.description or 'started'}"
+        elif ev.kind == "agent_stop":
+            detail = f"{ev.agent_type}: {'ERROR' if ev.error else 'done'}"
+        elif ev.kind == "tool_start":
+            summary = ev.tool_input_summary or ev.tool_name
+            detail = f"{ev.tool_name}: {summary}"
+        elif ev.kind == "tool_end":
+            detail = f"{ev.tool_name}: {'fail' if not ev.success else 'ok'}"
+        elif ev.kind == "task_completed":
+            detail = f"task: {ev.task_subject}"
+        else:
+            detail = ev.kind
+
+        self.event_log.append(EventLogEntry(
+            timestamp=ev.timestamp or time.time(),
+            kind=ev.kind,
+            detail=detail[:50],
+        ))
+        # Cap at 200 entries
+        if len(self.event_log) > 200:
+            self.event_log = self.event_log[-200:]
+
+        self.stats.total_events += 1
 
     def _on_agent_start(self, ev: Event, h: int, w: int):
         ocean_top = OCEAN_TOP
-        ocean_bot = h - 5
+        ocean_bot = self._ocean_bottom(h)
         if ocean_bot <= ocean_top + 1:
             ocean_bot = ocean_top + 2
         art_idx = agent_type_to_art_idx(ev.agent_type)
@@ -269,6 +312,7 @@ class Aquarium:
                         f.status = AgentStatus.ERROR
                         f.flip = True
                         f.speed = 0.1
+                        self.stats.error_count += 1
                     else:
                         f.status = AgentStatus.DONE
                         f.speed = max(f.speed, 0.6)  # swim out faster
@@ -303,13 +347,14 @@ class Aquarium:
                 char=random.choice(BUBBLE_CHARS),
             ))
             self.total_tools += 1
+            self.stats.tool_counts[ev.tool_name] = self.stats.tool_counts.get(ev.tool_name, 0) + 1
 
             # Sub-agent: 30% chance to spawn a tool creature
             if parent_fish is not None and random.random() < 0.3:
                 art_idx = random.randint(0, 2)
                 if art_idx == 2:  # crab → sea floor
                     cx = bx + random.uniform(-3, 3)
-                    cy = float(h - 3)
+                    cy = float(self._ocean_bottom(h))
                 else:  # shrimp or small fish → near parent
                     cx = bx + random.uniform(-3, 3)
                     cy = by + random.uniform(-1, 2)
@@ -339,7 +384,7 @@ class Aquarium:
             y = float(SURFACE_ROW - 3)  # sail above water, hull at waterline
             speed = 0.2
         else:  # dolphin
-            ocean_bot = h - 5
+            ocean_bot = self._ocean_bottom(h)
             y = random.uniform(OCEAN_TOP, max(OCEAN_TOP + 1, ocean_bot - 4))
             speed = random.uniform(0.4, 0.7)
 
@@ -355,6 +400,7 @@ class Aquarium:
         with self.lock:
             self.creatures.append(creature)
             self.total_tools += 1
+            self.stats.tool_counts[ev.tool_name] = self.stats.tool_counts.get(ev.tool_name, 0) + 1
 
     def _on_creature_end(self, ev: Event):
         with self.lock:
@@ -394,7 +440,7 @@ class Aquarium:
         self._safe_addstr(SURFACE_ROW + 1, 0, tile[::-1][:w], curses.color_pair(1))
 
     def _depth_attr(self, y, h):
-        ocean_depth = h - 3 - OCEAN_TOP
+        ocean_depth = self._ocean_bottom(h) - OCEAN_TOP
         if ocean_depth <= 0:
             return 0
         depth_ratio = (y - OCEAN_TOP) / ocean_depth
@@ -405,7 +451,7 @@ class Aquarium:
         return 0
 
     def _draw_water_bg(self, h, w):
-        for row in range(OCEAN_TOP, h - 2):
+        for row in range(OCEAN_TOP, self._panel_top(h) - 1):
             offset = (self.tick // 6 + row * 3) % 8
             depth = self._depth_attr(row, h)
             for col in range(offset, w - 1, 8):
@@ -417,7 +463,7 @@ class Aquarium:
             if sx >= w:
                 continue
             for i in range(sh):
-                row = h - 3 - i
+                row = self._ocean_bottom(h) - i
                 if row < OCEAN_TOP:
                     continue
                 ch = SEAWEED_FRAMES[frame_idx][i % len(SEAWEED_FRAMES[frame_idx])]
@@ -425,7 +471,7 @@ class Aquarium:
 
     def _draw_floor_decor(self, h, w):
         frame_idx = (self.tick // 10) % 2
-        floor_row = h - 3  # row just above the HUD bar
+        floor_row = self._ocean_bottom(h)  # row just above the sandy floor line
         for d in self.floor_decors:
             if d.x >= w - 1:
                 continue
@@ -463,7 +509,7 @@ class Aquarium:
         # Sandy floor with textured pattern (row above HUD)
         pattern = FLOOR_PATTERN
         tile = (pattern * ((w // len(pattern)) + 2))[:w - 1]
-        self._safe_addstr(h - 2, 0, tile, curses.color_pair(3) | curses.A_DIM)
+        self._safe_addstr(self._panel_top(h) - 2, 0, tile, curses.color_pair(3) | curses.A_DIM)
 
     def _draw_fish(self, fish: Fish, h, w):
         art_right, art_left, fw, fh = FISH_ARTS[fish.art_idx]
@@ -490,7 +536,7 @@ class Aquarium:
         # Label above fish
         label_y = draw_y - 1
         label_x = int(fish.x)
-        if OCEAN_TOP <= label_y < h - 2:
+        if OCEAN_TOP <= label_y < self._panel_top(h) - 1:
             elapsed = time.time() - fish.start_time
             time_str = f" {elapsed:.0f}s" if fish.status == AgentStatus.WORKING else ""
             text = fish.label[:20] + time_str
@@ -503,7 +549,7 @@ class Aquarium:
     def _draw_tool_bubbles(self, h, w):
         for tb in self.tool_bubbles:
             by, bx = int(tb.y), int(tb.x)
-            if OCEAN_TOP <= by < h - 2:
+            if OCEAN_TOP <= by < self._panel_top(h) - 1:
                 depth = self._depth_attr(by, h)
                 self._safe_addstr(by, bx, tb.char, curses.color_pair(6) | depth)
                 # Show tool name label next to bubble
@@ -513,7 +559,7 @@ class Aquarium:
 
     def _draw_task_corals(self, h, w):
         for tc in self.task_corals:
-            row = h - 3
+            row = self._ocean_bottom(h)
             color = curses.color_pair(2) | curses.A_BOLD if tc.completed else curses.color_pair(8) | curses.A_DIM
             marker = "V" if tc.completed else "?"
             text = f"[{marker}] {tc.subject[:12]}"
@@ -559,7 +605,7 @@ class Aquarium:
 
         # Label below creature
         label_y = draw_y + art_h
-        if label_y < h - 2:
+        if label_y < self._panel_top(h) - 1:
             parts = creature.tool_name.split("__")
             label = parts[1] if len(parts) >= 2 else creature.tool_name
             self._safe_addstr(label_y, draw_x, label[:15],
@@ -574,7 +620,86 @@ class Aquarium:
         hud = (f" Claudium  |  Agents: {active} active, {self.total_agents} total  |  "
                f"Tools: {self.total_tools}  |  Creatures: {creatures}  |  "
                f"Socket: {sock_status}  |  [Q] quit  [D] demo ")
-        self._safe_addstr(h - 1, 0, hud[:w - 1], curses.color_pair(1) | curses.A_REVERSE)
+        self._safe_addstr(self._panel_top(h) - 1, 0, hud[:w - 1], curses.color_pair(1) | curses.A_REVERSE)
+
+    # ──────────────────────────────────────────
+    #  Bottom panel
+    # ──────────────────────────────────────────
+
+    def _draw_panel(self, h, w):
+        panel_top = self._panel_top(h)
+        # Separator line with tab indicators
+        tabs = []
+        for mode in ["log", "stats"]:
+            if mode == self.panel_mode:
+                tabs.append(f"[{mode.upper()}]")
+            else:
+                tabs.append(f" {mode} ")
+        tab_str = " " + " | ".join(tabs) + "  [Tab] switch"
+        # Draw separator: fill with dashes, overlay tab string
+        sep = "-" * (w - 1)
+        self._safe_addstr(panel_top, 0, sep, curses.color_pair(1) | curses.A_DIM)
+        self._safe_addstr(panel_top, 0, tab_str, curses.color_pair(8))
+
+        # Delegate content rendering
+        content_top = panel_top + 1
+        content_height = PANEL_HEIGHT - 1
+        if self.panel_mode == "log":
+            self._draw_log_panel(content_top, content_height, w)
+        elif self.panel_mode == "stats":
+            self._draw_stats_panel(content_top, content_height, w)
+        elif self.panel_mode == "detail":
+            self._draw_detail_panel(content_top, content_height, w)
+
+    def _draw_log_panel(self, top, height, w):
+        if not self.event_log:
+            self._safe_addstr(top, 1, "No events yet...", curses.color_pair(8) | curses.A_DIM)
+            return
+
+        # Show most recent events (bottom = newest)
+        total = len(self.event_log)
+        if self.log_scroll > 0:
+            end = total - self.log_scroll
+            start = max(0, end - height)
+            visible = self.event_log[start:end]
+        else:
+            visible = self.event_log[-height:]
+
+        for i, entry in enumerate(visible):
+            t = time.strftime("%H:%M:%S", time.localtime(entry.timestamp))
+            kind_short = entry.kind.replace("_", " ")[:12]
+            line = f" {t}  {kind_short:<12}  {entry.detail}"
+
+            color = curses.color_pair(8)
+            if "ERROR" in entry.detail or "fail" in entry.detail:
+                color = curses.color_pair(5)  # red
+            elif "done" in entry.detail or "ok" in entry.detail:
+                color = curses.color_pair(2)  # green
+
+            self._safe_addstr(top + i, 0, line[:w - 1], color | curses.A_DIM)
+
+    def _draw_stats_panel(self, top, height, w):
+        elapsed = time.time() - self.stats.session_start
+        mins, secs = divmod(int(elapsed), 60)
+
+        with self.lock:
+            active = sum(1 for f in self.fishes if f.status in (AgentStatus.SPAWNING, AgentStatus.WORKING))
+
+        line1 = (f" Session: {mins}m{secs:02d}s  |  "
+                 f"Agents: {active} active / {self.total_agents} total  |  "
+                 f"Events: {self.stats.total_events}  |  "
+                 f"Errors: {self.stats.error_count}")
+        self._safe_addstr(top, 0, line1[:w - 1], curses.color_pair(8))
+
+        # Top tools by count
+        if self.stats.tool_counts:
+            sorted_tools = sorted(self.stats.tool_counts.items(), key=lambda x: -x[1])[:5]
+            tools_str = "  ".join(f"{name}({count})" for name, count in sorted_tools)
+            line2 = f" Top tools: {tools_str}"
+            self._safe_addstr(top + 1, 0, line2[:w - 1], curses.color_pair(8) | curses.A_DIM)
+
+    def _draw_detail_panel(self, top, height, w):
+        self._safe_addstr(top, 1, "No fish selected.", curses.color_pair(8) | curses.A_DIM)
 
     # ──────────────────────────────────────────
     #  Update logic
@@ -823,6 +948,17 @@ class Aquarium:
                 break
             if key in (ord('d'), ord('D')):
                 self.spawn_demo_agent()
+            if key == ord('\t'):  # Tab: cycle panel mode
+                if self.panel_mode == "log":
+                    self.panel_mode = "stats"
+                elif self.panel_mode == "stats":
+                    self.panel_mode = "log"
+                elif self.panel_mode == "detail":
+                    self.panel_mode = "log"
+            if key == curses.KEY_UP and self.panel_mode == "log":
+                self.log_scroll = min(self.log_scroll + 1, max(0, len(self.event_log) - PANEL_HEIGHT + 1))
+            elif key == curses.KEY_DOWN and self.panel_mode == "log":
+                self.log_scroll = max(0, self.log_scroll - 1)
 
             # Process incoming events from socket
             self._process_events()
@@ -864,6 +1000,7 @@ class Aquarium:
             self._draw_task_corals(h, w)
             self._draw_floor(h, w)
             self._draw_hud(h, w)
+            self._draw_panel(h, w)
 
             self.stdscr.refresh()
             self.tick += 1
