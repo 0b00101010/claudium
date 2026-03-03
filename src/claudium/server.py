@@ -7,6 +7,8 @@ import threading
 from collections import deque
 from .entities import Event, parse_event
 
+_MAX_MESSAGE_SIZE = 1024 * 1024  # 1 MB limit per client message
+
 
 class EventServer:
     def __init__(self, sock_path: str = "/tmp/claudium.sock"):
@@ -19,10 +21,24 @@ class EventServer:
 
     def start(self):
         if os.path.exists(self.sock_path):
-            os.unlink(self.sock_path)
+            # Check if another process is listening on this socket
+            test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                test_sock.settimeout(0.5)
+                test_sock.connect(self.sock_path)
+                test_sock.close()
+                # Connection succeeded → another instance is running
+                raise RuntimeError(
+                    f"Another claudium instance is already listening on {self.sock_path}"
+                )
+            except (ConnectionRefusedError, OSError):
+                # Stale socket file, safe to remove
+                test_sock.close()
+                os.unlink(self.sock_path)
+
         self._server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._server_sock.bind(self.sock_path)
-        self._server_sock.listen(5)
+        self._server_sock.listen(128)
         self._server_sock.settimeout(0.5)
         self._running = True
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
@@ -59,12 +75,15 @@ class EventServer:
 
     def _handle_client(self, conn: socket.socket):
         try:
+            conn.settimeout(5.0)  # prevent zombie threads from hung clients
             buf = b""
             while True:
                 chunk = conn.recv(4096)
                 if not chunk:
                     break
                 buf += chunk
+                if len(buf) > _MAX_MESSAGE_SIZE:
+                    break  # drop oversized messages
             for line in buf.decode("utf-8", errors="replace").splitlines():
                 line = line.strip()
                 if not line:
@@ -73,7 +92,7 @@ class EventServer:
                 if ev:
                     with self._lock:
                         self._queue.append(ev)
-        except OSError:
+        except (OSError, socket.timeout):
             pass
         finally:
             conn.close()

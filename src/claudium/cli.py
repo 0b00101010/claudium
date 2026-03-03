@@ -5,6 +5,7 @@ import curses
 import json
 import os
 import random
+import shlex
 import shutil
 import sys
 import threading
@@ -22,6 +23,8 @@ from .server import EventServer
 DEFAULT_SETTINGS_PATH = os.path.expanduser("~/.claude/settings.json")
 DEFAULT_SOCK = "/tmp/claudium.sock"
 
+_CLAUDIUM_HOOK_MARKER = "claudium-hook"
+
 
 # ──────────────────────────────────────────────
 #  Hook installation helpers
@@ -29,7 +32,7 @@ DEFAULT_SOCK = "/tmp/claudium.sock"
 
 def _build_hooks_config(sock_path: str) -> dict:
     """Build the hooks configuration dict for Claude Code settings."""
-    cmd = f"CLAUDIUM_SOCK={sock_path} claudium-hook"
+    cmd = f"CLAUDIUM_SOCK={shlex.quote(sock_path)} claudium-hook"
 
     def make_hook_entry(matcher: str = ""):
         entry = {
@@ -54,6 +57,14 @@ def _build_hooks_config(sock_path: str) -> dict:
             "TaskCompleted": [make_hook_entry()],
         }
     }
+
+
+def _is_claudium_hook_entry(entry: dict) -> bool:
+    """Check if a hook entry was installed by claudium."""
+    for h in entry.get("hooks", []):
+        if _CLAUDIUM_HOOK_MARKER in h.get("command", ""):
+            return True
+    return False
 
 
 def _check_existing_hooks(settings_path: str) -> dict:
@@ -88,11 +99,23 @@ def _install_hooks(settings_path: str, sock_path: str):
     claudium_events = ["SubagentStart", "SubagentStop", "PreToolUse",
                        "PostToolUse", "PostToolUseFailure", "TaskCompleted"]
 
-    conflicts = [e for e in claudium_events if e in existing]
+    # Remove any existing claudium hooks first (prevent duplicates)
+    for event_name in claudium_events:
+        if event_name in existing:
+            entries = existing[event_name]
+            if isinstance(entries, list):
+                existing[event_name] = [e for e in entries if not _is_claudium_hook_entry(e)]
+
+    # Check for non-claudium conflicts
+    conflicts = [e for e in claudium_events
+                 if e in existing and existing[e]]
     if conflicts:
-        print(f"Warning: Existing hooks found for: {', '.join(conflicts)}")
+        print(f"Note: Existing hooks found for: {', '.join(conflicts)}")
         print("Claudium hooks will be APPENDED to existing hooks (not replaced).")
-        answer = input("Continue? [y/N] ").strip().lower()
+        try:
+            answer = input("Continue? [y/N] ").strip().lower()
+        except EOFError:
+            answer = "y"
         if answer != "y":
             print("Aborted.")
             return
@@ -103,13 +126,14 @@ def _install_hooks(settings_path: str, sock_path: str):
         settings["hooks"] = {}
 
     for event_name, entries in new_config["hooks"].items():
-        if event_name in settings["hooks"]:
+        if event_name in settings["hooks"] and isinstance(settings["hooks"][event_name], list):
             settings["hooks"][event_name].extend(entries)
         else:
             settings["hooks"][event_name] = entries
 
     # Write settings
-    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    parent_dir = os.path.dirname(os.path.abspath(settings_path))
+    os.makedirs(parent_dir, exist_ok=True)
     with open(settings_path, "w") as f:
         json.dump(settings, f, indent=2)
 
@@ -124,8 +148,12 @@ def _uninstall_hooks(settings_path: str):
         print("No settings file found.")
         return
 
-    with open(settings_path) as f:
-        settings = json.load(f)
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except json.JSONDecodeError:
+        print(f"Error: {settings_path} contains invalid JSON. Please fix it first.")
+        return
 
     if "hooks" not in settings:
         print("No hooks found in settings.")
@@ -134,9 +162,9 @@ def _uninstall_hooks(settings_path: str):
     changed = False
     for event_name in list(settings["hooks"].keys()):
         entries = settings["hooks"][event_name]
-        filtered = [e for e in entries
-                    if not any("claudium" in h.get("command", "").lower()
-                               for h in e.get("hooks", []))]
+        if not isinstance(entries, list):
+            continue
+        filtered = [e for e in entries if not _is_claudium_hook_entry(e)]
         if len(filtered) < len(entries):
             changed = True
             if filtered:
@@ -185,12 +213,6 @@ def _run_tui(stdscr, sock: str, demo: bool):
 
 def _cmd_run(args):
     """Handler for the 'run' subcommand (also the default)."""
-    print(f"Claudium v{__version__} starting on socket: {args.sock}")
-    print("Press Q to quit, D to spawn demo fish")
-    if not args.demo:
-        print(f"\nWaiting for Claude Code hook events on {args.sock}")
-        print("Tip: Run 'claudium install' to configure Claude Code hooks")
-    print()
     curses.wrapper(lambda stdscr: _run_tui(stdscr, args.sock, args.demo))
 
 
@@ -210,7 +232,8 @@ def _cmd_check(args):
     if hooks:
         print("Current hooks in settings:")
         for name, entries in hooks.items():
-            print(f"  {name}: {len(entries)} handler(s)")
+            count = len(entries) if isinstance(entries, list) else 1
+            print(f"  {name}: {count} handler(s)")
     else:
         print("No hooks configured.")
 
@@ -225,23 +248,21 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Claudium - Claude Code Aquarium Visualizer",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--sock", default=DEFAULT_SOCK,
+                        help=f"Unix socket path (default: {DEFAULT_SOCK})")
+    parser.add_argument("--demo", action="store_true",
+                        help="Start with demo agents (no hooks needed)")
 
     subparsers = parser.add_subparsers(dest="command")
 
     # ---- run (default) ----
     p_run = subparsers.add_parser("run", help="Start the aquarium TUI")
-    p_run.add_argument("--sock", default=DEFAULT_SOCK,
-                       help=f"Unix socket path (default: {DEFAULT_SOCK})")
-    p_run.add_argument("--demo", action="store_true",
-                       help="Start with demo agents (no hooks needed)")
     p_run.set_defaults(func=_cmd_run)
 
     # ---- install ----
     p_install = subparsers.add_parser("install", help="Install hooks into Claude Code settings")
     p_install.add_argument("--settings", default=DEFAULT_SETTINGS_PATH,
                            help=f"Path to settings.json (default: {DEFAULT_SETTINGS_PATH})")
-    p_install.add_argument("--sock", default=DEFAULT_SOCK,
-                           help=f"Unix socket path (default: {DEFAULT_SOCK})")
     p_install.set_defaults(func=_cmd_install)
 
     # ---- uninstall ----
@@ -256,12 +277,6 @@ def _build_parser() -> argparse.ArgumentParser:
                          help=f"Path to settings.json (default: {DEFAULT_SETTINGS_PATH})")
     p_check.set_defaults(func=_cmd_check)
 
-    # Top-level --sock and --demo so `claudium --demo` works without subcommand
-    parser.add_argument("--sock", default=DEFAULT_SOCK,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--demo", action="store_true",
-                        help=argparse.SUPPRESS)
-
     return parser
 
 
@@ -272,6 +287,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def main():
     parser = _build_parser()
     args = parser.parse_args()
+
+    # Ensure settings is available for install/uninstall/check even from top-level
+    if not hasattr(args, "settings"):
+        args.settings = DEFAULT_SETTINGS_PATH
 
     if args.command is None:
         # No subcommand: default to 'run'
