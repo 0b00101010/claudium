@@ -83,7 +83,7 @@ class EventServer:
                     break
                 buf += chunk
                 if len(buf) > _MAX_MESSAGE_SIZE:
-                    break  # drop oversized messages
+                    return  # drop oversized messages entirely
             for line in buf.decode("utf-8", errors="replace").splitlines():
                 line = line.strip()
                 if not line:

@@ -999,13 +999,13 @@ class Aquarium:
                     self._safe_addstr(int(ac.y) + i, int(ac.x), line,
                                       curses.color_pair(4))
 
-    # ──────────────────────────────────────────
-    #  Demo mode (for testing without hooks)
-    # ──────────────────────────────────────────
-
     def _get_terminal_size(self):
         """Thread-safe terminal size. Single tuple assignment is atomic in CPython."""
         return self._cached_size
+
+    # ──────────────────────────────────────────
+    #  Demo mode (for testing without hooks)
+    # ──────────────────────────────────────────
 
     def spawn_demo_agent(self):
         labels = [
@@ -1132,7 +1132,6 @@ class Aquarium:
             self._update_sky(w)
             with self.lock:
                 self._update_ambient(h, w)
-            with self.lock:
                 ambient_snapshot = list(self.ambient_creatures)
             self._draw_sky(w)
             self._draw_birds(ambient_snapshot, w)
