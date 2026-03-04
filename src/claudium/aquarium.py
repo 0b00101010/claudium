@@ -49,9 +49,7 @@ class Aquarium:
         self.selected_fish_idx: int = -1
         self.log_scroll = 0
         self.milestones_triggered: set[str] = set()
-        h, w = self.stdscr.getmaxyx()
-        self._cached_h = h
-        self._cached_w = w
+        self._cached_size = self.stdscr.getmaxyx()  # (h, w) tuple for atomic reads
         self._setup_curses()
         self._setup_seaweed()
         self._setup_floor_decor()
@@ -86,7 +84,7 @@ class Aquarium:
             "red": curses.color_pair(5),
             "magenta": curses.color_pair(7),
             "yellow": curses.color_pair(3),
-            "white": curses.color_pair(4),
+            "white": curses.color_pair(4) | curses.A_DIM,
             "green": curses.color_pair(2),
         }
         # Collect candidate x positions, avoid seaweed
@@ -1006,8 +1004,8 @@ class Aquarium:
     # ──────────────────────────────────────────
 
     def _get_terminal_size(self):
-        """Thread-safe terminal size. Cache from main loop."""
-        return self._cached_h, self._cached_w
+        """Thread-safe terminal size. Single tuple assignment is atomic in CPython."""
+        return self._cached_size
 
     def spawn_demo_agent(self):
         labels = [
@@ -1086,7 +1084,7 @@ class Aquarium:
     def run(self):
         while True:
             h, w = self.stdscr.getmaxyx()
-            self._cached_h, self._cached_w = h, w
+            self._cached_size = (h, w)
 
             key = self.stdscr.getch()
             if key in (ord('q'), ord('Q')):
@@ -1140,12 +1138,19 @@ class Aquarium:
             self._draw_water_bg(h, w)
             self._draw_ambient(h, w)
 
+            # Draw static environment (background layer)
+            self._draw_floor(h, w)
+            self._draw_seaweed(h, w)
+            self._draw_floor_decor(h, w)
+            self._draw_task_corals(h, w)
+
             selectable = self._get_selectable_fish()
             selected_fish = selectable[self.selected_fish_idx] if 0 <= self.selected_fish_idx < len(selectable) else None
             # Remember the selected fish's identity for stable tracking
             selected_agent_id = selected_fish.agent_id if selected_fish else None
 
             with self.lock:
+                # Draw fish and creatures (foreground layer, on top of environment)
                 for fish in self.fishes:
                     self._update_fish(fish, h, w)
                     self._draw_fish(fish, h, w, selected=(fish is selected_fish))
@@ -1176,13 +1181,7 @@ class Aquarium:
                     self._draw_creature(creature, h, w)
                 self.creatures = [c for c in self.creatures if c.alive]
 
-            # Draw static environment first so fish/creatures appear on top
-            self._draw_seaweed(h, w)
-            self._draw_floor_decor(h, w)
-            self._draw_task_corals(h, w)
-            self._draw_floor(h, w)
-
-            with self.lock:
+                # Draw tool bubbles and creatures (topmost layer)
                 self._update_tool_bubbles()
                 self._draw_tool_bubbles(h, w)
                 self._update_tool_creatures(h, w)
