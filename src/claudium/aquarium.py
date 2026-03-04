@@ -769,7 +769,7 @@ class Aquarium:
             line = f" {t}  {kind_short:<12}  {entry.detail}"
 
             color = curses.color_pair(4)
-            if entry.detail.endswith("ERROR") or entry.detail.endswith("fail"):
+            if entry.detail.endswith("ERROR") or entry.detail.endswith("FAIL"):
                 color = curses.color_pair(5)  # red
             elif entry.detail.endswith("done") or entry.detail.endswith("ok"):
                 color = curses.color_pair(2)  # green
@@ -976,8 +976,8 @@ class Aquarium:
                 elif ac.direction == -1 and ac.x < -3:
                     ac.x = float(w + 3)
 
-    def _draw_ambient(self, h, w):
-        for ac in self.ambient_creatures:
+    def _draw_ambient(self, creatures, h, w):
+        for ac in creatures:
             if ac.kind == "jellyfish":
                 frame = JELLYFISH_ARTS[self.tick // 10 % 2]
                 for i, line in enumerate(frame):
@@ -991,8 +991,8 @@ class Aquarium:
                     self._safe_addstr(int(ac.y) + i, int(ac.x), line,
                                       curses.color_pair(1) | curses.A_DIM | depth)
 
-    def _draw_birds(self, w):
-        for ac in self.ambient_creatures:
+    def _draw_birds(self, creatures, w):
+        for ac in creatures:
             if ac.kind == "bird":
                 frame = BIRD_ARTS[self.tick // 8 % 2]
                 for i, line in enumerate(frame):
@@ -1132,11 +1132,13 @@ class Aquarium:
             self._update_sky(w)
             with self.lock:
                 self._update_ambient(h, w)
+            with self.lock:
+                ambient_snapshot = list(self.ambient_creatures)
             self._draw_sky(w)
-            self._draw_birds(w)
+            self._draw_birds(ambient_snapshot, w)
             self._draw_waves(w)
             self._draw_water_bg(h, w)
-            self._draw_ambient(h, w)
+            self._draw_ambient(ambient_snapshot, h, w)
 
             # Draw static environment (background layer)
             self._draw_floor(h, w)
