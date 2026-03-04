@@ -6,6 +6,7 @@ import math
 import random
 import time
 import threading
+import uuid
 from .entities import (
     AgentStatus, Fish, Bubble, ToolBubble, TaskCoral,
     Creature, CreatureType, mcp_tool_to_creature_type,
@@ -48,6 +49,7 @@ class Aquarium:
         self.selected_fish_idx: int = -1
         self.log_scroll = 0
         self.milestones_triggered: set[str] = set()
+        self._cached_size = self.stdscr.getmaxyx()  # (h, w) tuple for atomic reads
         self._setup_curses()
         self._setup_seaweed()
         self._setup_floor_decor()
@@ -60,18 +62,13 @@ class Aquarium:
         curses.use_default_colors()
         curses.curs_set(0)
         self.stdscr.nodelay(True)
-        curses.init_pair(1, curses.COLOR_CYAN, -1)     # wave/water
-        curses.init_pair(2, curses.COLOR_GREEN, -1)    # seaweed
-        curses.init_pair(3, curses.COLOR_YELLOW, -1)   # fish working
-        curses.init_pair(4, curses.COLOR_WHITE, -1)    # fish spawning
+        curses.init_pair(1, curses.COLOR_CYAN, -1)     # wave/water/dolphin
+        curses.init_pair(2, curses.COLOR_GREEN, -1)    # seaweed/turtle
+        curses.init_pair(3, curses.COLOR_YELLOW, -1)   # fish working/sailboat
+        curses.init_pair(4, curses.COLOR_WHITE, -1)    # fish spawning/labels/clouds
         curses.init_pair(5, curses.COLOR_RED, -1)      # fish error
         curses.init_pair(6, curses.COLOR_BLUE, -1)     # bubbles
         curses.init_pair(7, curses.COLOR_MAGENTA, -1)  # done
-        curses.init_pair(8, curses.COLOR_WHITE, -1)    # label/hud text
-        curses.init_pair(9, curses.COLOR_YELLOW, -1)    # sailboat
-        curses.init_pair(10, curses.COLOR_CYAN, -1)    # dolphin body
-        curses.init_pair(11, curses.COLOR_WHITE, -1)   # clouds
-        curses.init_pair(12, curses.COLOR_GREEN, -1)   # main agent turtle
 
     def _setup_seaweed(self):
         h, w = self.stdscr.getmaxyx()
@@ -87,7 +84,7 @@ class Aquarium:
             "red": curses.color_pair(5),
             "magenta": curses.color_pair(7),
             "yellow": curses.color_pair(3),
-            "white": curses.color_pair(8) | curses.A_DIM,
+            "white": curses.color_pair(4) | curses.A_DIM,
             "green": curses.color_pair(2),
         }
         # Collect candidate x positions, avoid seaweed
@@ -128,12 +125,13 @@ class Aquarium:
         h, w = self.stdscr.getmaxyx()
         ocean_top = OCEAN_TOP
         ocean_bot = self._ocean_bottom(h)
-        mid_y = (ocean_top + ocean_bot) / 2
+        safe_bot = max(ocean_top + 2, ocean_bot)
+        mid_y = max(float(ocean_top + 1), (ocean_top + safe_bot) / 2)
         self.main_fish = Fish(
             agent_id="__main__",
             label="Claude",
             status=AgentStatus.WORKING,
-            x=float(w) / 2,
+            x=max(5.0, float(w) / 2),
             y=mid_y,
             speed=random.uniform(0.3, 0.5),
             art_idx=4,
@@ -216,14 +214,14 @@ class Aquarium:
                 sx = rng.randint(0, max(0, w - 2))
                 sy = rng.randint(0, 3)
                 ch = rng.choice(STAR_CHARS)
-                attr = curses.color_pair(3) if ch == "*" else curses.color_pair(11)
+                attr = curses.color_pair(3) if ch == "*" else curses.color_pair(4)
                 if rng.random() < 0.7:  # twinkle: some stars dimmer
                     attr |= curses.A_DIM
                 self._safe_addstr(sy, sx, ch, attr)
         # Draw sun or moon in upper-right
         body_art = SUN_ART if self.sky_body == "sun" else MOON_ART
         body_x = w - len(body_art[0]) - 2
-        body_color = curses.color_pair(3) if self.sky_body == "sun" else curses.color_pair(11)
+        body_color = curses.color_pair(3) if self.sky_body == "sun" else curses.color_pair(4)
         for i, line in enumerate(body_art):
             self._safe_addstr(i, body_x, line, body_color | curses.A_BOLD)
         # Draw clouds
@@ -231,7 +229,7 @@ class Aquarium:
             art = CLOUD_ARTS[cloud.art_idx]
             for i, line in enumerate(art):
                 self._safe_addstr(cloud.y + i, int(cloud.x), line,
-                                  curses.color_pair(11) | curses.A_BOLD)
+                                  curses.color_pair(4) | curses.A_BOLD)
 
     # ──────────────────────────────────────────
     #  Event processing
@@ -253,6 +251,8 @@ class Aquarium:
         elif ev.kind == "tool_end":
             if ev.tool_name.startswith("mcp__"):
                 self._on_creature_end(ev)
+            else:
+                self._on_tool_end(ev)
         elif ev.kind == "task_completed":
             self._on_task_completed(ev, w)
         self._record_event(ev)
@@ -276,29 +276,34 @@ class Aquarium:
         else:
             detail = ev.kind
 
-        self.event_log.append(EventLogEntry(
+        entry = EventLogEntry(
             timestamp=ev.timestamp or time.time(),
             kind=ev.kind,
             detail=detail[:50],
-        ))
-        # Cap at 200 entries
-        if len(self.event_log) > 200:
-            self.event_log = self.event_log[-200:]
-
-        self.stats.total_events += 1
+        )
+        with self.lock:
+            self.event_log.append(entry)
+            # Cap at 200 entries
+            if len(self.event_log) > 200:
+                self.event_log = self.event_log[-200:]
+            self.stats.total_events += 1
 
     def _check_milestones(self, h, w):
+        ocean_bot = max(OCEAN_TOP + 2, self._ocean_bottom(h))
         # 100th tool call -> burst of jellyfish
         if self.total_tools >= 100 and "tools_100" not in self.milestones_triggered:
             self.milestones_triggered.add("tools_100")
+            new_creatures = []
             for _ in range(5):
-                self.ambient_creatures.append(AmbientCreature(
+                new_creatures.append(AmbientCreature(
                     kind="jellyfish",
                     x=random.uniform(3, max(4, w - 8)),
-                    y=random.uniform(OCEAN_TOP + 1, self._ocean_bottom(h)),
+                    y=random.uniform(OCEAN_TOP + 1, ocean_bot),
                     speed=random.uniform(0.02, 0.05),
                     direction=random.choice([-1, 1]),
                 ))
+            with self.lock:
+                self.ambient_creatures.extend(new_creatures)
             self._record_event(Event(
                 kind="milestone", timestamp=time.time(),
                 description="100 tools reached! Ocean comes alive!",
@@ -307,14 +312,17 @@ class Aquarium:
         # 10th agent -> school of fish
         if self.total_agents >= 10 and "agents_10" not in self.milestones_triggered:
             self.milestones_triggered.add("agents_10")
+            new_creatures = []
             for _ in range(4):
-                self.ambient_creatures.append(AmbientCreature(
+                new_creatures.append(AmbientCreature(
                     kind="fish",
                     x=random.uniform(0, max(1, w - 5)),
-                    y=random.uniform(OCEAN_TOP + 1, self._ocean_bottom(h)),
+                    y=random.uniform(OCEAN_TOP + 1, ocean_bot),
                     speed=random.uniform(0.15, 0.25),
                     direction=random.choice([-1, 1]),
                 ))
+            with self.lock:
+                self.ambient_creatures.extend(new_creatures)
             self._record_event(Event(
                 kind="milestone", timestamp=time.time(),
                 description="10 agents spawned! Fish school appears!",
@@ -325,6 +333,8 @@ class Aquarium:
         ocean_bot = self._ocean_bottom(h)
         if ocean_bot <= ocean_top + 1:
             ocean_bot = ocean_top + 2
+        y_lo = ocean_top + 1
+        y_hi = max(y_lo, ocean_bot - 3)
         art_idx = agent_type_to_art_idx(ev.agent_type)
         label = ev.description or ev.agent_type
         fish = Fish(
@@ -332,7 +342,7 @@ class Aquarium:
             label=label,
             status=AgentStatus.SPAWNING,
             x=-10.0,
-            y=random.uniform(ocean_top + 1, ocean_bot - 3),
+            y=random.uniform(y_lo, y_hi),
             speed=random.uniform(0.3, 0.8),
             art_idx=art_idx,
             direction=1,
@@ -348,7 +358,7 @@ class Aquarium:
                     if ev.error:
                         f.status = AgentStatus.ERROR
                         f.flip = True
-                        f.speed = 0.1
+                        f.speed = max(f.speed, 0.4)
                         self.stats.error_count += 1
                     else:
                         f.status = AgentStatus.DONE
@@ -422,6 +432,9 @@ class Aquarium:
                 x=random.randint(3, max(4, w - 15)),
                 completed=True,
             ))
+            # Cap to prevent unbounded growth
+            if len(self.task_corals) > 30:
+                self.task_corals = self.task_corals[-30:]
 
     def _on_mcp_tool(self, ev: Event, creature_type: CreatureType, h: int, w: int):
         if creature_type == CreatureType.SAILBOAT:
@@ -446,6 +459,23 @@ class Aquarium:
             self.total_tools += 1
             self.stats.tool_counts[ev.tool_name] = self.stats.tool_counts.get(ev.tool_name, 0) + 1
 
+    def _on_tool_end(self, ev: Event):
+        """Handle non-MCP tool completion — update speech bubble with result."""
+        with self.lock:
+            target_fish = None
+            for f in self.fishes:
+                if f.agent_id == ev.agent_id:
+                    target_fish = f
+                    break
+            if target_fish is None:
+                target_fish = self.main_fish
+            if target_fish:
+                status = "ok" if ev.success else "FAIL"
+                target_fish.last_tool = f"{ev.tool_name}: {status}"[:25]
+                target_fish.last_tool_time = time.time()
+            if not ev.success:
+                self.stats.error_count += 1
+
     def _on_creature_end(self, ev: Event):
         with self.lock:
             for c in self.creatures:
@@ -454,7 +484,9 @@ class Aquarium:
                         and not c.leaving):
                     c.leaving = True
                     c.speed = max(c.speed, 0.6)
-                    c.jumping = False  # stop dolphin jump mid-air
+                    if c.jumping:
+                        c.y = c.jump_base_y  # restore y before leaving
+                        c.jumping = False
                     break
 
     # ──────────────────────────────────────────
@@ -528,7 +560,7 @@ class Aquarium:
                         self._safe_addstr(row, d.x, line, attr | curses.A_BOLD)
             elif d.kind == "rock":
                 lines, rw, rh, color_name = ROCK_ARTS[d.art_idx]
-                attr = self._floor_color_map.get(color_name, curses.color_pair(8))
+                attr = self._floor_color_map.get(color_name, curses.color_pair(4))
                 for i, line in enumerate(reversed(lines)):
                     row = floor_row - i
                     if row >= OCEAN_TOP:
@@ -557,10 +589,13 @@ class Aquarium:
 
     def _draw_fish(self, fish: Fish, h, w, selected=False):
         art_right, art_left, fw, fh = FISH_ARTS[fish.art_idx]
-        art = art_right if fish.direction == 1 else art_left
+        facing_right = fish.direction == 1
+        if fish.flip:
+            facing_right = not facing_right
+        art = art_right if facing_right else art_left
 
         if fish.art_idx == 4:  # main agent turtle — always green
-            color = curses.color_pair(12) | curses.A_BOLD
+            color = curses.color_pair(2) | curses.A_BOLD
         elif fish.status == AgentStatus.SPAWNING:
             color = curses.color_pair(4)
         elif fish.status == AgentStatus.WORKING:
@@ -573,7 +608,7 @@ class Aquarium:
         if selected:
             color |= curses.A_REVERSE
 
-        wobble_y = int(math.sin(self.tick * 0.15 + fish.x * 0.1) * 0.7)
+        wobble_y = int(math.sin(self.tick * 0.15 + fish.x * 0.1) * 1.5)
         draw_y = int(fish.y) + wobble_y
         depth = self._depth_attr(draw_y, h)
 
@@ -587,14 +622,14 @@ class Aquarium:
             elapsed = time.time() - fish.start_time
             time_str = f" {elapsed:.0f}s" if fish.status == AgentStatus.WORKING else ""
             text = fish.label[:20] + time_str
-            self._safe_addstr(label_y, label_x, text, curses.color_pair(8) | curses.A_DIM)
+            self._safe_addstr(label_y, label_x, text, curses.color_pair(4) | curses.A_DIM)
 
         # Speech bubble: last tool call
         if fish.last_tool and time.time() - fish.last_tool_time < 10:
             bubble_y = label_y - 1
             if OCEAN_TOP <= bubble_y < self._panel_top(h) - 1:
                 age = time.time() - fish.last_tool_time
-                attr = curses.color_pair(8)
+                attr = curses.color_pair(4)
                 if age > 7:
                     attr |= curses.A_DIM
                 self._safe_addstr(bubble_y, label_x, fish.last_tool, attr)
@@ -612,12 +647,12 @@ class Aquarium:
                 # Show tool name label next to bubble
                 if tb.age < 15:
                     self._safe_addstr(by, bx + 2, tb.tool_name,
-                                      curses.color_pair(8) | curses.A_DIM | depth)
+                                      curses.color_pair(4) | curses.A_DIM | depth)
 
     def _draw_task_corals(self, h, w):
         for tc in self.task_corals:
             row = self._ocean_bottom(h)
-            color = curses.color_pair(2) | curses.A_BOLD if tc.completed else curses.color_pair(8) | curses.A_DIM
+            color = curses.color_pair(2) | curses.A_BOLD if tc.completed else curses.color_pair(4) | curses.A_DIM
             marker = "V" if tc.completed else "?"
             text = f"[{marker}] {tc.subject[:12]}"
             self._safe_addstr(row, tc.x, text, color)
@@ -625,10 +660,10 @@ class Aquarium:
     def _draw_creature(self, creature: Creature, h, w):
         if creature.creature_type == CreatureType.SAILBOAT:
             art_data = SAILBOAT_ART
-            color = curses.color_pair(9) | curses.A_BOLD
+            color = curses.color_pair(3) | curses.A_BOLD
         else:
             art_data = DOLPHIN_ART
-            color = curses.color_pair(10) | curses.A_BOLD
+            color = curses.color_pair(1) | curses.A_BOLD
 
         art_right, art_left, art_w, art_h = art_data
         art = art_right if creature.direction == 1 else art_left
@@ -666,7 +701,7 @@ class Aquarium:
             parts = creature.tool_name.split("__")
             label = parts[1] if len(parts) >= 2 else creature.tool_name
             self._safe_addstr(label_y, draw_x, label[:15],
-                              curses.color_pair(8) | curses.A_DIM)
+                              curses.color_pair(4) | curses.A_DIM)
 
     def _draw_hud(self, h, w):
         with self.lock:
@@ -694,7 +729,7 @@ class Aquarium:
         # Draw separator: fill with dashes, overlay tab string
         sep = "-" * (w - 1)
         self._safe_addstr(panel_top, 0, sep, curses.color_pair(1) | curses.A_DIM)
-        self._safe_addstr(panel_top, 0, tab_str, curses.color_pair(8))
+        self._safe_addstr(panel_top, 0, tab_str, curses.color_pair(4))
 
         # Delegate content rendering
         content_top = panel_top + 1
@@ -707,28 +742,36 @@ class Aquarium:
             self._draw_detail_panel(content_top, content_height, w)
 
     def _draw_log_panel(self, top, height, w):
-        if not self.event_log:
-            self._safe_addstr(top, 1, "No events yet...", curses.color_pair(8) | curses.A_DIM)
+        with self.lock:
+            log_snapshot = list(self.event_log)
+
+        if not log_snapshot:
+            self._safe_addstr(top, 1, "No events yet...", curses.color_pair(4) | curses.A_DIM)
             return
 
+        # Clamp scroll to valid range
+        max_scroll = max(0, len(log_snapshot) - height)
+        if self.log_scroll > max_scroll:
+            self.log_scroll = max_scroll
+
         # Show most recent events (bottom = newest)
-        total = len(self.event_log)
+        total = len(log_snapshot)
         if self.log_scroll > 0:
             end = total - self.log_scroll
             start = max(0, end - height)
-            visible = self.event_log[start:end]
+            visible = log_snapshot[start:end]
         else:
-            visible = self.event_log[-height:]
+            visible = log_snapshot[-height:]
 
         for i, entry in enumerate(visible):
             t = time.strftime("%H:%M:%S", time.localtime(entry.timestamp))
             kind_short = entry.kind.replace("_", " ")[:12]
             line = f" {t}  {kind_short:<12}  {entry.detail}"
 
-            color = curses.color_pair(8)
-            if "ERROR" in entry.detail or "fail" in entry.detail:
+            color = curses.color_pair(4)
+            if entry.detail.endswith("ERROR") or entry.detail.endswith("FAIL"):
                 color = curses.color_pair(5)  # red
-            elif "done" in entry.detail or "ok" in entry.detail:
+            elif entry.detail.endswith("done") or entry.detail.endswith("ok"):
                 color = curses.color_pair(2)  # green
 
             self._safe_addstr(top + i, 0, line[:w - 1], color | curses.A_DIM)
@@ -744,14 +787,14 @@ class Aquarium:
                  f"Agents: {active} active / {self.total_agents} total  |  "
                  f"Events: {self.stats.total_events}  |  "
                  f"Errors: {self.stats.error_count}")
-        self._safe_addstr(top, 0, line1[:w - 1], curses.color_pair(8))
+        self._safe_addstr(top, 0, line1[:w - 1], curses.color_pair(4))
 
         # Top tools by count
         if self.stats.tool_counts:
             sorted_tools = sorted(self.stats.tool_counts.items(), key=lambda x: -x[1])[:5]
             tools_str = "  ".join(f"{name}({count})" for name, count in sorted_tools)
             line2 = f" Top tools: {tools_str}"
-            self._safe_addstr(top + 1, 0, line2[:w - 1], curses.color_pair(8) | curses.A_DIM)
+            self._safe_addstr(top + 1, 0, line2[:w - 1], curses.color_pair(4) | curses.A_DIM)
 
     def _get_selectable_fish_unlocked(self):
         """Return selectable fish list. Caller must hold self.lock or ensure thread safety."""
@@ -769,18 +812,18 @@ class Aquarium:
         selectable = self._get_selectable_fish()
         if self.selected_fish_idx < 0 or self.selected_fish_idx >= len(selectable):
             self._safe_addstr(top, 1, "No fish selected. Use \u2190 \u2192 to select.",
-                              curses.color_pair(8) | curses.A_DIM)
+                              curses.color_pair(4) | curses.A_DIM)
             return
 
         fish = selectable[self.selected_fish_idx]
         elapsed = time.time() - fish.start_time
 
         line1 = f" Agent: {fish.label[:20]} ({fish.agent_id[:10]})  |  Status: {fish.status.value.upper()} {elapsed:.0f}s"
-        self._safe_addstr(top, 0, line1[:w-1], curses.color_pair(8))
+        self._safe_addstr(top, 0, line1[:w-1], curses.color_pair(4))
 
         dir_arrow = '\u2192' if fish.direction == 1 else '\u2190'
         line2 = f" Last tool: {fish.last_tool or 'none'}  |  Speed: {fish.speed:.1f}  |  Dir: {dir_arrow}"
-        self._safe_addstr(top + 1, 0, line2[:w-1], curses.color_pair(8) | curses.A_DIM)
+        self._safe_addstr(top + 1, 0, line2[:w-1], curses.color_pair(4) | curses.A_DIM)
 
     # ──────────────────────────────────────────
     #  Update logic
@@ -790,14 +833,21 @@ class Aquarium:
         _, _, fw, fh = FISH_ARTS[fish.art_idx]
         fish.x += fish.speed * fish.direction
 
+        ocean_top = OCEAN_TOP
+        ocean_bot = self._ocean_bottom(h)
+
         # Working fish: random directional swimming within bounds
         if fish.status == AgentStatus.WORKING:
             if fish.x > w - fw - 5:
                 fish.direction = -1
             elif fish.x < 5:
                 fish.direction = 1
-            if random.random() < 0.02:
+            elif random.random() < 0.02:
                 fish.direction *= -1
+
+            # Gentle vertical drift
+            fish.y += math.sin(self.tick * 0.03 + fish.x * 0.05) * 0.15
+            fish.y = max(float(ocean_top + 1), min(fish.y, float(max(ocean_top + 2, ocean_bot - fh))))
 
             # Emit occasional bubbles
             if random.random() < 0.06:
@@ -831,6 +881,11 @@ class Aquarium:
             # Leaving: just swim straight out, no bouncing
             if creature.x > w + 15 or creature.x < -15:
                 creature.alive = False
+            # Continue aging wake trail so it fades properly
+            if creature.creature_type == CreatureType.SAILBOAT:
+                creature.wake_trail = [
+                    (wx, age + 1) for wx, age in creature.wake_trail if age < 20
+                ]
             return
 
         if creature.creature_type == CreatureType.SAILBOAT:
@@ -901,6 +956,8 @@ class Aquarium:
                 ac.x += ac.speed * ac.direction
                 # Gentle sin-wave vertical float
                 ac.y += math.sin(self.tick * 0.05 + ac.x * 0.1) * 0.05
+                ocean_bot = self._ocean_bottom(h)
+                ac.y = max(float(OCEAN_TOP + 1), min(ac.y, float(max(OCEAN_TOP + 2, ocean_bot - 3))))
                 # Wrap around
                 if ac.x > w:
                     ac.x = -5.0
@@ -919,8 +976,8 @@ class Aquarium:
                 elif ac.direction == -1 and ac.x < -3:
                     ac.x = float(w + 3)
 
-    def _draw_ambient(self, h, w):
-        for ac in self.ambient_creatures:
+    def _draw_ambient(self, creatures, h, w):
+        for ac in creatures:
             if ac.kind == "jellyfish":
                 frame = JELLYFISH_ARTS[self.tick // 10 % 2]
                 for i, line in enumerate(frame):
@@ -934,13 +991,17 @@ class Aquarium:
                     self._safe_addstr(int(ac.y) + i, int(ac.x), line,
                                       curses.color_pair(1) | curses.A_DIM | depth)
 
-    def _draw_birds(self, w):
-        for ac in self.ambient_creatures:
+    def _draw_birds(self, creatures, w):
+        for ac in creatures:
             if ac.kind == "bird":
                 frame = BIRD_ARTS[self.tick // 8 % 2]
                 for i, line in enumerate(frame):
                     self._safe_addstr(int(ac.y) + i, int(ac.x), line,
-                                      curses.color_pair(11))
+                                      curses.color_pair(4))
+
+    def _get_terminal_size(self):
+        """Thread-safe terminal size. Single tuple assignment is atomic in CPython."""
+        return self._cached_size
 
     # ──────────────────────────────────────────
     #  Demo mode (for testing without hooks)
@@ -954,10 +1015,10 @@ class Aquarium:
         ]
         agent_types = ["Explore", "general-purpose", "Plan", "code-reviewer",
                        "feature-dev:code-architect"]
-        h, w = self.stdscr.getmaxyx()
+        h, w = self._get_terminal_size()
         ev = Event(
             kind="agent_start",
-            agent_id=f"demo-{random.randint(100, 999)}",
+            agent_id=f"demo-{uuid.uuid4().hex[:8]}",
             agent_type=random.choice(agent_types),
             description=random.choice(labels),
             timestamp=time.time(),
@@ -977,7 +1038,7 @@ class Aquarium:
                     agent_id=ev.agent_id,
                     timestamp=time.time(),
                 )
-                self._handle_event(tool_ev, *self.stdscr.getmaxyx())
+                self._handle_event(tool_ev, *self._get_terminal_size())
             # Occasionally spawn an MCP creature
             if random.random() < 0.55:
                 mcp_tools = [
@@ -993,7 +1054,7 @@ class Aquarium:
                     agent_id=ev.agent_id,
                     timestamp=time.time(),
                 )
-                self._handle_event(mcp_ev, *self.stdscr.getmaxyx())
+                self._handle_event(mcp_ev, *self._get_terminal_size())
                 time.sleep(random.uniform(3, 6))
                 mcp_end = Event(
                     kind="tool_end",
@@ -1002,7 +1063,7 @@ class Aquarium:
                     agent_id=ev.agent_id,
                     timestamp=time.time(),
                 )
-                self._handle_event(mcp_end, *self.stdscr.getmaxyx())
+                self._handle_event(mcp_end, *self._get_terminal_size())
 
             time.sleep(0.5)
             stop_ev = Event(
@@ -1012,7 +1073,7 @@ class Aquarium:
                 error=random.random() < 0.1,
                 timestamp=time.time(),
             )
-            self._handle_event(stop_ev, *self.stdscr.getmaxyx())
+            self._handle_event(stop_ev, *self._get_terminal_size())
 
         threading.Thread(target=lifecycle, daemon=True).start()
 
@@ -1023,6 +1084,7 @@ class Aquarium:
     def run(self):
         while True:
             h, w = self.stdscr.getmaxyx()
+            self._cached_size = (h, w)
 
             key = self.stdscr.getch()
             if key in (ord('q'), ord('Q')):
@@ -1033,25 +1095,32 @@ class Aquarium:
                 if self.panel_mode == "log":
                     self.panel_mode = "stats"
                 elif self.panel_mode == "stats":
-                    self.panel_mode = "log"
+                    self.panel_mode = "detail"
                 elif self.panel_mode == "detail":
                     self.panel_mode = "log"
             if key == curses.KEY_LEFT:
                 selectable = self._get_selectable_fish()
                 if selectable:
-                    self.selected_fish_idx = (self.selected_fish_idx - 1) % len(selectable)
+                    if self.selected_fish_idx < 0:
+                        self.selected_fish_idx = len(selectable) - 1
+                    else:
+                        self.selected_fish_idx = (self.selected_fish_idx - 1) % len(selectable)
                     self.panel_mode = "detail"
             elif key == curses.KEY_RIGHT:
                 selectable = self._get_selectable_fish()
                 if selectable:
-                    self.selected_fish_idx = (self.selected_fish_idx + 1) % len(selectable)
+                    if self.selected_fish_idx < 0:
+                        self.selected_fish_idx = 0
+                    else:
+                        self.selected_fish_idx = (self.selected_fish_idx + 1) % len(selectable)
                     self.panel_mode = "detail"
             elif key == 27:  # Esc
                 self.selected_fish_idx = -1
                 if self.panel_mode == "detail":
                     self.panel_mode = "log"
             if key == curses.KEY_UP and self.panel_mode == "log":
-                self.log_scroll = min(self.log_scroll + 1, max(0, len(self.event_log) - PANEL_HEIGHT + 1))
+                max_scroll = max(0, len(self.event_log) - (PANEL_HEIGHT - 1))
+                self.log_scroll = min(self.log_scroll + 1, max_scroll)
             elif key == curses.KEY_DOWN and self.panel_mode == "log":
                 self.log_scroll = max(0, self.log_scroll - 1)
 
@@ -1061,26 +1130,43 @@ class Aquarium:
             self.stdscr.erase()
 
             self._update_sky(w)
-            self._update_ambient(h, w)
+            with self.lock:
+                self._update_ambient(h, w)
+                ambient_snapshot = list(self.ambient_creatures)
             self._draw_sky(w)
-            self._draw_birds(w)
+            self._draw_birds(ambient_snapshot, w)
             self._draw_waves(w)
             self._draw_water_bg(h, w)
-            self._draw_ambient(h, w)
+            self._draw_ambient(ambient_snapshot, h, w)
+
+            # Draw static environment (background layer)
+            self._draw_floor(h, w)
+            self._draw_seaweed(h, w)
+            self._draw_floor_decor(h, w)
+            self._draw_task_corals(h, w)
 
             selectable = self._get_selectable_fish()
             selected_fish = selectable[self.selected_fish_idx] if 0 <= self.selected_fish_idx < len(selectable) else None
+            # Remember the selected fish's identity for stable tracking
+            selected_agent_id = selected_fish.agent_id if selected_fish else None
 
             with self.lock:
+                # Draw fish and creatures (foreground layer, on top of environment)
                 for fish in self.fishes:
                     self._update_fish(fish, h, w)
                     self._draw_fish(fish, h, w, selected=(fish is selected_fish))
                 self.fishes = [f for f in self.fishes if f.alive]
 
-                # Reset selection if selected fish is gone
-                if self.selected_fish_idx >= 0:
+                # Re-resolve selection by identity after potential fish removal
+                if selected_agent_id is not None:
                     selectable = self._get_selectable_fish_unlocked()
-                    if self.selected_fish_idx >= len(selectable):
+                    found = False
+                    for i, f in enumerate(selectable):
+                        if f.agent_id == selected_agent_id:
+                            self.selected_fish_idx = i
+                            found = True
+                            break
+                    if not found:
                         self.selected_fish_idx = len(selectable) - 1 if selectable else -1
                         if self.selected_fish_idx == -1 and self.panel_mode == "detail":
                             self.panel_mode = "log"
@@ -1096,15 +1182,11 @@ class Aquarium:
                     self._draw_creature(creature, h, w)
                 self.creatures = [c for c in self.creatures if c.alive]
 
-            with self.lock:
+                # Draw tool bubbles and creatures (topmost layer)
                 self._update_tool_bubbles()
                 self._draw_tool_bubbles(h, w)
                 self._update_tool_creatures(h, w)
                 self._draw_tool_creatures(h, w)
-            self._draw_seaweed(h, w)
-            self._draw_floor_decor(h, w)
-            self._draw_task_corals(h, w)
-            self._draw_floor(h, w)
             self._draw_hud(h, w)
             self._draw_panel(h, w)
 

@@ -21,21 +21,23 @@ SOCKET_PATH = os.environ.get("CLAUDIUM_SOCK", "/tmp/claudium.sock")
 
 def _summarize_tool_input(tool_name: str, tool_input: dict) -> str:
     """Extract a short summary from tool input."""
+    if not isinstance(tool_input, dict):
+        return ""
     if tool_name == "Bash":
-        return tool_input.get("command", "")[:40]
+        return (tool_input.get("command", "") or "")[:40]
     if tool_name in ("Read", "Write", "Edit"):
-        path = tool_input.get("file_path", "")
+        path = tool_input.get("file_path", "") or ""
         return os.path.basename(path) if path else ""
     if tool_name == "Grep":
-        return tool_input.get("pattern", "")[:30]
+        return (tool_input.get("pattern", "") or "")[:30]
     if tool_name == "Glob":
-        return tool_input.get("pattern", "")[:30]
+        return (tool_input.get("pattern", "") or "")[:30]
     if tool_name == "WebSearch":
-        return tool_input.get("query", "")[:30]
+        return (tool_input.get("query", "") or "")[:30]
     if tool_name == "WebFetch":
-        return tool_input.get("url", "")[:40]
+        return (tool_input.get("url", "") or "")[:40]
     if tool_name == "Task":
-        return tool_input.get("description", "")[:30]
+        return (tool_input.get("description", "") or "")[:30]
     if tool_name.startswith("mcp__"):
         parts = tool_name.split("__")
         if len(parts) >= 3:
@@ -69,7 +71,7 @@ def build_event_from_hook(hook_input: dict) -> dict | None:
 
     if hook_name == "PreToolUse":
         tool_name = hook_input.get("tool_name", "")
-        tool_input = hook_input.get("tool_input", {})
+        tool_input = hook_input.get("tool_input") or {}
         return {
             "event": "tool_start",
             "tool_name": tool_name,
